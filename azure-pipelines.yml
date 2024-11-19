@@ -1,0 +1,184 @@
+# Starter pipeline
+
+
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+  branches:
+    include:
+      - main
+
+
+variables:
+- group: group
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+
+- stage: Code_Analysis_SAST
+  jobs:
+  - job: 
+    steps:
+    - task: Maven@4
+      displayName: Maven compile
+      inputs:
+        mavenPomFile: './app/pom.xml'
+        goals: 'compile'
+        publishJUnitResults: true
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+        testRunTitle: 'JUnit Results'
+        javaHomeOption: 'JDKVersion'
+        mavenVersionOption: 'Default'
+        mavenAuthenticateFeed: false
+        effectivePomSkip: false
+        sonarQubeRunAnalysis: false
+    - task: Maven@4
+      displayName: Maven package
+      inputs:
+        mavenPomFile: './app/pom.xml'
+        publishJUnitResults: false
+        javaHomeOption: 'JDKVersion'
+        mavenVersionOption: 'Default'
+        mavenAuthenticateFeed: false
+        effectivePomSkip: false
+        sonarQubeRunAnalysis: false
+    - task: SonarCloudPrepare@3
+      displayName: Sonarcloud init
+      inputs:
+        SonarCloud: 'sonarcloud'
+        organization: 'miketech'
+        scannerMode: 'cli'
+        configMode: 'manual'
+        cliProjectKey: 'miketech_azure_devops'
+        cliProjectName: 'azure_devops'
+        cliSources: './app'
+        extraProperties: |
+          sonar.java.binaries=./app/target/classes
+          sonar.java.libraries=./app/target/dependency
+    - task: SonarCloudAnalyze@3
+      displayName: Sonarcloud Analysis
+      inputs:
+        jdkversion: 'JAVA_HOME_17_X64'
+    - task: SonarCloudPublish@3
+      displayName:  Sonarcloud Gate Results
+      inputs:
+        pollingTimeoutSec: '120'
+
+- stage: Dependencies_Scan_SCA
+  jobs:
+  - job: 
+    steps:
+#    - task: dependency-check-build-task@6
+#      inputs:
+#        projectName: 'java_app'
+#        scanPath: './app'
+#        format: 'HTML'
+#        uploadReports: true
+#        nvdApiKey: '839d5d5a-48a2-4b4d-94cb-a09938adad9e'
+    - task: SnykSecurityScan@1
+      displayName: Snyk Dependencies Scan
+      inputs:
+        serviceConnectionEndpoint: 'snyk'
+        testType: 'app'
+        monitorWhen: 'always'
+        failOnIssues: false
+        projectName: 'azure_app'
+        organization: '3a4a76ae-50c2-48f2-8f08-5bdd662b9152'
+        testDirectory: './app'
+        
+
+- stage: Dockerfile_Image_Scan
+  jobs:
+  - job:
+    steps:
+    - task: SonarCloudPrepare@3
+      displayName: Sonarcloud init
+      inputs:
+        SonarCloud: 'dockerfile'
+        organization: 'miketech'
+        scannerMode: 'cli'
+        configMode: 'manual'
+        cliProjectKey: 'miketech_azure-docker'
+        cliProjectName: 'azure-docker'
+        cliSources: './'
+        extraProperties: | 
+          sonar.inclusions=Dockerfile
+
+    - task: SonarCloudAnalyze@3
+      displayName: Dockerfile analysis
+      inputs:
+        jdkversion: 'JAVA_HOME_17_X64'
+
+    - task: SonarCloudPublish@3
+      displayName: Sonarcloud Gate results
+      inputs:
+        pollingTimeoutSec: '120'
+    
+    - task: Maven@4
+      displayName: Maven package
+      inputs:
+        mavenPomFile: './app/pom.xml'
+        publishJUnitResults: false
+        javaHomeOption: 'JDKVersion'
+        mavenVersionOption: 'Default'
+        mavenAuthenticateFeed: false
+        effectivePomSkip: false
+        sonarQubeRunAnalysis: false
+
+    - task: Docker@2
+      displayName: Build Image
+      inputs:
+        command: 'build'
+        Dockerfile: './Dockerfile'
+        buildContext: './'
+        tags: 'mike004/java:latest'
+    
+    - task: SnykSecurityScan@1
+      displayName: Image Scan
+      inputs:
+        serviceConnectionEndpoint: 'snyk'
+        testType: 'container'
+        dockerImageName: 'mike004/java:latest'
+        monitorWhen: 'always'
+        failOnIssues: false
+        projectName: 'azure_dockerfile'
+        organization: '3a4a76ae-50c2-48f2-8f08-5bdd662b9152'
+        testDirectory: './'
+        
+
+    - task: DockerCompose@1
+      displayName: App integration test
+      inputs:
+        containerregistrytype: 'Container Registry'
+        dockerComposeFile: './docker-compose.yaml'
+        dockerComposeFileArgs: |
+          DB_USER=$(DB_USER)
+          DB_PORT=$(DB_PORT)
+          DB_NAME=$(DB_NAME)
+          DB_PASSWORD=$(DB_PASSWORD)
+          DB_ROOT_PASSWORD=$(DB_ROOT_PASSWORD)
+        action: 'Run a Docker Compose command'
+        dockerComposeCommand: 'up -d'
+        currentWorkingDirectory: './'
+  
+    - script: |
+        /usr/bin/docker run -u 0 --network project_pipeline_testing -v /home/vsts/work/1/s/owaspzap:/zap/wrk/:rw zaproxy/zap-stable zap-baseline.py -t http://webapp:8080/simple-web-app/users -J report.json -r report.html
+        exit 0
+      displayName: ZAP DAST Scan
+      continueOnError: true
+      
+    - task: Docker@2
+      displayName: Push to registry
+      inputs:
+        containerRegistry: 'dockerhub'
+        repository: 'mike004/java'
+        command: 'push'
+        tags: 'latest'
+    
+    
+
+
